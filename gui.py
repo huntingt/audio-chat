@@ -1,61 +1,40 @@
 import pyaudio
-import modulate as m
+import modem as m
 import time
 import numpy as np
 import tkinter as tk
-import hamming
-from joblib import load
-
-QAM_MODEL = load("model.joblib")
-def qam16_decode(samples):
-    old = np.concatenate(([1.], samples))[:-1]
-    return QAM_MODEL.predict(list(zip(
-        old.real, old.imag,
-        samples.real, samples.imag
-    )))
 
 class Model:
     def __init__(self, display):
         self.display = display
-
-        self.demodulator = None
-
+        self.modem = None
         self.p = pyaudio.PyAudio()
-        self.istream = None
-        self.ostream = None
 
     def convert_samples(self, samples):
-        nibs = qam16_decode(np.array(samples))
-        nibs = hamming.decode(nibs)
-        
-        if len(nibs) % 2 == 1:
-            self.display(f"[error] length is odd len={len(samples)}")
-
-        raw = []
-        for ms, ls in zip(nibs[1::2], nibs[::2]):
-            raw.append(ms << 4 | ls)
+        bits = m.from_square_qam(samples, 1)
+        byte = [m.bg(bits[i:i+8]) for i in range(0,len(bits),8)]
 
         try:
-            output = bytearray(raw).decode()
+            output = bytearray(byte).decode()
         except:
-            output = f"[error] invalid UTF-8 {repr(bytearray(raw))}"
+            output = f"[error] invalid UTF-8 {repr(bytearray(byte))}"
         self.display(output)
 
-    def start(self,
-              rx_sample_rate, rx_fc, rx_baud,
-              tx_sample_rate, tx_fc, tx_baud):
-        if self.demodulator is None:
-            self.demodulator = m.Demodulate(rx_fc, rx_baud, rx_sample_rate,
-                                            self.convert_samples)
+    def start(self, fs, fc, baud):
+        if self.modem is None:
+            self.modem = m.QAMModem(fs, fc, baud, 0.25, max=1024)
             
             def callback(in_data, frame_count, time_info, status):
-                self.demodulator.consume(np.frombuffer(in_data, dtype=np.float32))
+                msgs = self.modem.demodulate(np.frombuffer(in_data, dtype=np.float32))
+                for msg in msgs:
+                     self.convert_samples(msg)
+
                 data = np.zeros(frame_count, dtype=np.float32).tostring()
                 return (data, pyaudio.paContinue)
 
             self.istream = self.p.open(format=pyaudio.paFloat32,
                             channels=1,
-                            rate=rx_sample_rate,
+                            rate=fs,
                             input=True,
                             frames_per_buffer=CHUNK,
                             stream_callback=callback)
@@ -63,36 +42,27 @@ class Model:
 
             self.ostream = self.p.open(format=pyaudio.paFloat32,
                             channels=1,
-                            rate=tx_sample_rate,
+                            rate=fs,
                             output=True)
-            
-            self.tx_sample_rate = tx_sample_rate
-            self.tx_fc = tx_fc
-            self.tx_baud = tx_baud
 
             time.sleep(0.1)
 
     def stop(self):
-        if self.demodulator:
-            self.demodulator = None
+        if self.modem:
+            self.modem = None
 
             self.istream.stop_stream()
             self.istream.close()
             self.ostream.close()
 
-            self.istream = None
-            self.ostream = None
-
     def send(self, string):
-        nibs = []
-        for byte in string.encode():
-            nibs += [byte & 0xF, (byte >> 4) & 0xF]
-
-        nibs = hamming.encode(nibs)
-        samples = m.modulate(m.qam16_encode(nibs),
-                             self.tx_fc,
-                             self.tx_baud,
-                             self.tx_sample_rate).real
+        byte = string.encode()
+        def get_bit(i):
+            base = i // 8
+            offset = i % 8
+            return (byte[base] >> offset) & 1
+        bits = np.array([get_bit(i) for i in range(len(byte)*8)])
+        samples = self.modem.modulate(m.square_qam(bits, 1))
         self.ostream.write(samples.astype(np.float32).tostring())
 
 def isPositiveInteger(inp):
@@ -130,15 +100,10 @@ class Window:
             row += 1
             return row - 1
 
-        tk.Label(self.settings, text="Rx").grid(row=next(), column=0, columnspan=2)
-        self.rx_sample_rate = field(next(), "Sample Rate (Hz)", "48000")
-        self.rx_fc = field(next(), "Carrier (Hz)", "1500")
-        self.rx_baud = field(next(), "Baud Rate (Hz)", "300")
-
-        tk.Label(self.settings, text="Tx").grid(row=next(), column=0, columnspan=2)
-        self.tx_sample_rate = field(next(), "Sample Rate (Hz)", "48000")
-        self.tx_fc = field(next(), "Carrier (Hz)", "1500")
-        self.tx_baud = field(next(), "Baud Rate (Hz)", "300")
+        #tk.Label(self.settings, text="Rx").grid(row=next(), column=0, columnspan=2)
+        self.sample_rate = field(next(), "Sample Rate (Hz)", "48000")
+        self.fc = field(next(), "Carrier (Hz)", "3000")
+        self.baud = field(next(), "Baud Rate (Hz)", "500")
 
         self.btn_start = tk.Button(self.settings,
                                    text="Start",
@@ -169,18 +134,11 @@ class Window:
         self.settings.place_forget()
         self.chat.pack(fill=tk.BOTH)
 
-        rx_sample_rate = int(self.rx_sample_rate.get())
-        rx_fc = int(self.rx_fc.get())
-        rx_baud = int(self.rx_baud.get())
-        
-        tx_sample_rate = int(self.tx_sample_rate.get())
-        tx_fc = int(self.tx_fc.get())
-        tx_baud = int(self.tx_baud.get())
+        fs = int(self.sample_rate.get())
+        fc = int(self.fc.get())
+        baud = int(self.baud.get())
 
-        self.model.start(
-            rx_sample_rate, rx_fc, rx_baud,
-            tx_sample_rate, tx_fc, tx_baud
-        )
+        self.model.start(fs, fc, baud)
 
     def stop(self):
         self.chat.pack_forget()

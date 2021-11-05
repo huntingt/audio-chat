@@ -1,4 +1,5 @@
 import numpy as np
+import matplotlib.pyplot as plt
 
 def bg(bits):
     num = 0
@@ -267,9 +268,8 @@ def square_qam_constellation(pairs, l):
     plt.show()
 
 if __name__ == "__main__":
-    import matplotlib.pyplot as plt
 
-    l = 1
+    l = 2
     modem = QAMModem(50000, 3000, 500)
     bits = np.random.randint(0,2,1000)
     ideal = square_qam(bits, l)
@@ -277,16 +277,27 @@ if __name__ == "__main__":
 
     rx = tx + 0.05 * np.random.normal(size=len(tx))
 
-    # freq = np.fft.fftfreq(rx.size, d=1./modem.fs)[:len(rx)//2]
-    # fig, ax = plt.subplots(figsize = (9, 6))
-    # ax.plot(freq, abs(np.fft.fft(rx))[:len(rx)//2])
-    # ax.set_yscale("log")
-    # plt.show()
+    freq = np.fft.fftfreq(rx.size, d=1./modem.fs)[:len(rx)//2]
+    fft = abs(np.fft.fft(rx))[:len(rx)//2]
+
+    fig, ax = plt.subplots(figsize = (9, 6))
+    ax.plot(freq, fft)
+    ax.set_yscale("log")
+    plt.show()
+
+    s_start = np.searchsorted(freq, modem.fc-modem.bandwidth()/3.)
+    s_end   = np.searchsorted(freq, modem.fc+modem.bandwidth()/3.)
+    n_start = np.searchsorted(freq, modem.fc+modem.bandwidth()*1.5)
+    n_end   = np.searchsorted(freq, modem.fc+modem.bandwidth()*2.0)
+    snr = 20 * np.log10(
+        np.mean(fft[s_start:s_end])/np.mean(fft[n_start:n_end]))
+    print(f"SNR = {snr} dB")
 
     decoded = modem.demodulate(rx)
     if len(decoded) == 1:
         actual = decoded[0]
-        print(f"MER = {MER(ideal, actual)} db")
+        print(f"MER = {MER(ideal, actual)} dB")
+        print(f"BER = {sum(bits != from_square_qam(actual, l))/len(bits)}")
         square_qam_constellation(actual, l)
     else:
         print(f"failed with {len(decoded)} results")

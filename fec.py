@@ -16,7 +16,7 @@ def mul_m2(a, b):
     a ^= a >> 16
     return a & 1
 
-class ConvolutionCode:
+class ConvolutionalCode:
     def __init__(self, generators, ideals):
         self.g = generators
         
@@ -36,12 +36,14 @@ class ConvolutionCode:
 
     def encode(self, bits):
         state = 0
+        samples = []
         for bit in bits:
             x = (state << 1) | bit
             state = x & self.mask
 
             parity = mul_m2(self.g, x)
-            yield self.ideals[np.dot(parity, self.collapse)]
+            samples.append(self.ideals[np.dot(parity, self.collapse)])
+        return samples
 
     def decode(self, samples):
         pm = np.array([np.Inf] * self.num_states)
@@ -81,6 +83,25 @@ class ConvolutionCode:
 
         return (best_pm, bits)
 
+class HalvedQAMConvolutionalCode:
+    def __init__(self, generators, l):
+        ideals = np.array([
+            m.square_qam(m.un(num, l)*2, l)[0].real
+             for num in range(2**l)
+        ])
+        self.code = ConvolutionalCode(generators, ideals)
+
+    def encode(self, bits):
+        return np.array([
+            complex(i,q) for i,q in window(self.code.encode(bits), 2, pad=0.)
+        ])
+
+    def decode(self, samples):
+        halved = np.zeros(len(samples)*2)
+        halved[::2] = samples.real
+        halved[1::2] = samples.imag
+        return self.code.decode(halved)
+
 if __name__ == "__main__":
     import modem as m
     
@@ -89,18 +110,22 @@ if __name__ == "__main__":
     constellation = np.array(
         [m.square_qam(m.un(num, 2*l), l)[0] for num in range(2**(l+l))]
     )
-    code = ConvolutionCode(parity, constellation)
 
-    modem = m.QAMModem(5000, 3000, 500, 0.25)
+    code = HalvedQAMConvolutionalCode(parity, l)
+
+    modem = m.QAMModem(5000, 3000, 500)
     bits = np.random.randint(0, 2, 1000)
-    ideal = np.array(list(code.encode(bits)))
+    ideal = np.array(code.encode(bits))
     tx = modem.modulate(ideal)
 
-    rx = tx + 0.1 * np.random.normal(size=len(tx))
+    rx = tx + 0.07 * np.random.normal(size=len(tx))
 
     demodulated = modem.demodulate(rx)
     if len(demodulated) == 1:
         actual = demodulated[0]
+
+        m.square_qam_constellation(actual, l)
+
         dbits = code.decode(actual)[1]
         print(f"MER = {m.MER(ideal, actual)} dB")
         print(f"BER = {sum(dbits != bits)/len(bits)}")

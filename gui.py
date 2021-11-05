@@ -11,7 +11,7 @@ class Model:
         self.p = pyaudio.PyAudio()
 
     def convert_samples(self, samples):
-        bits = m.from_square_qam(samples, 1)
+        bits = m.from_square_qam(samples, self.l)
         byte = [m.bg(bits[i:i+8]) for i in range(0,len(bits),8)]
 
         try:
@@ -20,8 +20,10 @@ class Model:
             output = f"[error] invalid UTF-8 {repr(bytearray(byte))}"
         self.display(output)
 
-    def start(self, fs, fc, baud):
+    def start(self, fs, fc, baud, l):
         if self.modem is None:
+            self.l = l
+
             self.modem = m.QAMModem(fs, fc, baud, 0.25, max=1024)
             
             def callback(in_data, frame_count, time_info, status):
@@ -62,7 +64,7 @@ class Model:
             offset = i % 8
             return (byte[base] >> offset) & 1
         bits = np.array([get_bit(i) for i in range(len(byte)*8)])
-        samples = self.modem.modulate(m.square_qam(bits, 1))
+        samples = self.modem.modulate(m.square_qam(bits, self.l))
         self.ostream.write(samples.astype(np.float32).tostring())
 
 def isPositiveInteger(inp):
@@ -104,6 +106,12 @@ class Window:
         self.sample_rate = field(next(), "Sample Rate (Hz)", "48000")
         self.fc = field(next(), "Carrier (Hz)", "3000")
         self.baud = field(next(), "Baud Rate (Hz)", "500")
+        tk.Label(self.settings, text="Modulation").grid(row=row, column=0)
+        
+        self.modulation = tk.StringVar(self.settings, value="QAM4")
+        tk.OptionMenu(self.settings, self.modulation, "QAM4", "QAM16",)\
+                .grid(row=next(), column=1)
+
 
         self.btn_start = tk.Button(self.settings,
                                    text="Start",
@@ -137,8 +145,9 @@ class Window:
         fs = int(self.sample_rate.get())
         fc = int(self.fc.get())
         baud = int(self.baud.get())
+        l = ["QAM4", "QAM16"].index(self.modulation.get()) + 1
 
-        self.model.start(fs, fc, baud)
+        self.model.start(fs, fc, baud, l)
 
     def stop(self):
         self.chat.pack_forget()
@@ -179,108 +188,3 @@ if __name__ == "__main__":
             root.destroy()
         root.protocol("WM_DELETE_WINDOW", on_close)
         root.mainloop()
-
-    if False:
-        SAMPLE_RATE = 48000
-        FC = 3000
-        BAUD = 300
-
-        def display(samples):
-            print("\033[200D< ", m.qam16_decode(samples))
-            print("> ", end="", flush=True)
-
-        demod = m.Demodulate(FC, BAUD, SAMPLE_RATE, display)
-        
-        def callback(in_data, frame_count, time_info, status):
-            demod.consume(np.frombuffer(in_data, dtype=np.float32))
-            data = np.zeros(frame_count, dtype=np.float32).tostring()
-            return (data, pyaudio.paContinue)
-
-        p = pyaudio.PyAudio()
-        istream = p.open(format=pyaudio.paFloat32,
-                         channels=1,
-                         rate=SAMPLE_RATE,
-                         input=True,
-                         frames_per_buffer=CHUNK,
-                         stream_callback=callback)
-        istream.start_stream()
-
-        time.sleep(0.1)
-
-        ostream = p.open(format=pyaudio.paFloat32,
-                        channels=1,
-                        rate=SAMPLE_RATE,
-                        output=True,
-                        output_device_index=1)
-
-        while True:
-            line = input("> ")
-            if line == ":end":
-                break
-
-            bits = []
-            for byte in line.encode():
-                bits += [byte & 0xF, (byte >> 2) & 0xF]
-
-            samples = m.modulate(m.qam16_encode(bits), FC, BAUD, SAMPLE_RATE).real
-            ostream.write(samples.astype(np.float32).tostring())
-
-        istream.stop_stream()
-        istream.close()
-        ostream.close()
-        p.terminate()
-
-    if False:
-        SAMPLE_RATE = 48000
-        FC = 3000
-        BAUD = 300
-
-
-        s = None
-        def display(samples):
-            global s
-            s = np.array(samples)
-            print(m.qam16_decode(samples))
-
-        demod = m.Demodulate(FC, BAUD, SAMPLE_RATE, display)
-        
-        def callback(in_data, frame_count, time_info, status):
-            demod.consume(np.frombuffer(in_data, dtype=np.float32))
-            data = np.zeros(frame_count, dtype=np.float32).tostring()
-            return (data, pyaudio.paContinue)
-
-        p = pyaudio.PyAudio()
-        istream = p.open(format=pyaudio.paFloat32,
-                         channels=1,
-                         rate=SAMPLE_RATE,
-                         input=True,
-                         frames_per_buffer=CHUNK,
-                         stream_callback=callback)
-        istream.start_stream()
-
-        time.sleep(1)
-
-        ostream = p.open(format=pyaudio.paFloat32,
-                        channels=1,
-                        rate=SAMPLE_RATE,
-                        output=True,
-                        output_device_index=1)
-
-        bits = np.random.randint(0, 16, 1000)
-        samples = m.modulate(m.qam16_encode(bits), FC, BAUD, SAMPLE_RATE).real
-        ostream.write(samples.astype(np.float32).tostring())
-
-        time.sleep(1)
-
-        istream.stop_stream()
-        istream.close()
-        ostream.close()
-        p.terminate()
-
-        import matplotlib.pyplot as plt
-        s *= 1.15
-        plt.scatter(s.real, s.imag)
-        for x in [-2/3*m.A_MAX, 0, 2/3*m.A_MAX]:
-            plt.axvline(x=x)
-            plt.axhline(y=x)
-        plt.show()

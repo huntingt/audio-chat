@@ -32,7 +32,7 @@ def square_qam(bits, l):
 
 def partition_square(a, s):
     for i in range(1, s):
-        if a * np.sqrt(2) > 1 - 2*i/s:
+        if a * np.sqrt(2) > 1 - (2*i-1)/(s-1):
             return i - 1
     return s - 1
 
@@ -131,17 +131,18 @@ class QAMModem:
 
         self.n_preamble = 15
         self.preamble = PreambleDetector(10, self.U)
+        self.end = 0.
+        self.suffix = 3
 
         self.buffer = np.zeros(len(self.filter), dtype=complex)
         self.mode = "standby"
         self.samples = []
-        self.suffix = 3
         self.t = 0
 
         self.max = max
 
     def modulate(self, pairs):
-        pairs = np.concatenate(([0,1]*self.n_preamble+[-1, 1], pairs, [0]*5))
+        pairs = np.concatenate(([0,1]*self.n_preamble+[-1, 1], pairs, [self.end]*5))
 
         # upsample to the sampling frequency
         iq = np.zeros(len(pairs) * self.U, dtype=complex)
@@ -177,8 +178,7 @@ class QAMModem:
                 self.mode = "record"
         elif self.mode == "record":
             y = x * self.corrections['1/a']
-            # end = abs(1 - y) < 0.2 TODO
-            end = abs(y) < 0.2
+            end = abs(self.end - y) < 0.2
             if self.timer > 0:
                 self.timer -= 1
             elif end and self.stop >= self.suffix:
@@ -224,27 +224,48 @@ def MER(ideal, actual):
     diff = actual - ideal
     return 10*np.log10(num/sum(diff*np.conj(diff))).real
 
+def square_qam_constellation(pairs, l):
+    fig, ax = plt.subplots(figsize = (6, 6))
+    ax.scatter(pairs.real, pairs.imag, c="black", linewidths=1., s=15.,
+               marker="+")
+    ax.tick_params(left=True, right=True, bottom=True, top=True)
+    ax.set_xlabel("I")
+    ax.set_ylabel("Q")
+    size = np.array((-1,1))*(1+1/(2**l-1))/np.sqrt(2)
+    ax.set_xlim(size)
+    ax.set_ylim(size)
+    if l is not None:
+        ax.set_title(f"{2**(l+l)}QAM Constellation")
+        for i in range(1, 2**l):
+            line = (1 - (2*i-1)/(2**l-1))/np.sqrt(2)
+            ax.axvline(x=line, ls="--", c="black", lw=.5)
+            ax.axhline(y=line, ls="--", c="black", lw=.5)
+    else:
+        ax.set_title(f"QAM Constellation")
+    plt.tight_layout()
+    plt.show()
+
 if __name__ == "__main__":
     import matplotlib.pyplot as plt
 
+    l = 1
     modem = QAMModem(50000, 3000, 500, 0.25)
     bits = np.random.randint(0,2,1000)
-    ideal = square_qam(bits, 2)
+    ideal = square_qam(bits, l)
     tx = modem.modulate(ideal)
 
     rx = tx + 0.05 * np.random.normal(size=len(tx))
 
-    freq = np.fft.fftfreq(rx.size, d=1./modem.fs)[:len(rx)//2]
-    fig, ax = plt.subplots(figsize = (9, 6))
-    ax.plot(freq, abs(np.fft.fft(rx))[:len(rx)//2])
-    ax.set_yscale("log")
-    plt.show()
+    # freq = np.fft.fftfreq(rx.size, d=1./modem.fs)[:len(rx)//2]
+    # fig, ax = plt.subplots(figsize = (9, 6))
+    # ax.plot(freq, abs(np.fft.fft(rx))[:len(rx)//2])
+    # ax.set_yscale("log")
+    # plt.show()
 
     decoded = modem.demodulate(rx)
     if len(decoded) == 1:
         actual = decoded[0]
         print(f"MER = {MER(ideal, actual)} db")
-        plt.scatter(actual.real, actual.imag, marker="+")
-        plt.show()
+        square_qam_constellation(actual, l)
     else:
         print(f"failed with {len(decoded)} results")

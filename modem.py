@@ -65,12 +65,18 @@ def root_raised_cos_filter(symbols, U, beta):
     return filter / np.linalg.norm(filter)
 
 class PreambleDetector:
-    def __init__(self, n_peaks, U):
+    def __init__(self, n_peaks, U, **kwargs):
+        self.kwargs = {
+            "peak_end_factor": 0.4,
+            "peak_start_factor": 0.6,
+            **kwargs
+        }
+
         self.peaks = []
         self.n_peaks = n_peaks
         self.max = None
         self.t = 0
-        self.U = U 
+        self.U = U
 
     def peak_avg(self):
         if len(self.peaks) == 0:
@@ -100,13 +106,13 @@ class PreambleDetector:
     def step(self, x):
         # detect scanning mode for new peaks
         if self.max is None:
-            if abs(x) > 0.6 * abs(self.peak_avg()):
+            if abs(x) > self.kwargs["peak_start_factor"] * abs(self.peak_avg()):
                 self.max = (self.t, x)
         # detect new max for tracking peak
         elif abs(x) > abs(self.max[1]):
             self.max = (self.t, x)
         # detect end of tracking peak
-        elif abs(x) < 0.4 * abs(self.max[1]):
+        elif abs(x) < self.kwargs["peak_end_factor"] * abs(self.max[1]):
             self.peaks.append(self.max)
             if len(self.peaks) > self.n_peaks:
                 self.peaks = self.peaks[1:]
@@ -118,7 +124,23 @@ class PreambleDetector:
         return None
 
 class QAMModem:
-    def __init__(self, fs, fc, baud, beta, max=None):
+    def __init__(self, fs, fc, baud, **kwargs):
+        self.kwargs = {
+            "max_sigma_a": 0.1,
+            "max_a": 100,
+            "dt_bias": 0.,
+            "preamble_peaks": 15,
+            "preamble_peak_threshold": 10,
+            "conclusion_length": 5,
+            "conclusion_length_threshold": 3,
+            "conclusion_point": 0.,
+            "conclusion_radius": 0.2,
+            "srrc_beta": 0.25,
+            "srrc_symbols": 10,
+            "max_length": None,
+            **kwargs
+        }
+
         self.fs = fs
         
         self.U = fs // baud
@@ -126,23 +148,26 @@ class QAMModem:
 
         self.fc = (fc // baud) * baud
 
-        self.beta = beta
-        self.filter = root_raised_cos_filter(10, self.U, beta)
+        self.filter = root_raised_cos_filter(
+            self.kwargs["srrc_symbols"],
+            self.U,
+            self.kwargs["srrc_beta"]
+        )
 
-        self.n_preamble = 15
-        self.preamble = PreambleDetector(10, self.U)
-        self.end = 0.
-        self.suffix = 3
+        self.preamble = [0,1]*self.kwargs["preamble_peaks"] + [-1,1]
+        self.preamble_detector = PreambleDetector(
+            self.kwargs["preamble_peak_threshold"], self.U, **kwargs)
+
+        self.conclusion = [self.kwargs["conclusion_point"]]\
+                * self.kwargs["conclusion_length"]
 
         self.buffer = np.zeros(len(self.filter), dtype=complex)
         self.mode = "standby"
         self.samples = []
         self.t = 0
 
-        self.max = max
-
     def modulate(self, pairs):
-        pairs = np.concatenate(([0,1]*self.n_preamble+[-1, 1], pairs, [self.end]*5))
+        pairs = np.concatenate((self.preamble, pairs, self.conclusion))
 
         # upsample to the sampling frequency
         iq = np.zeros(len(pairs) * self.U, dtype=complex)
@@ -156,32 +181,28 @@ class QAMModem:
         return mod.real
 
     def bandwidth(self):
-        return self.fs * (1+self.beta) / (2*self.U)
+        return self.fs * (1+self.kwargs["srrc_beta"]) / (2*self.U)
 
-    def demodulate2(self, samples):
-        demod = samples * np.exp(2j*np.pi*self.fc/self.fs *
-                                 np.arange(len(samples)))
-        return demod
-        # matched filter
-        iq = np.convolve(demod, self.filter)
-        return iq
+    def check_corrections(self):
+        return self.corrections and\
+            self.corrections["sigma_|a|/|a|"] < self.kwargs["max_sigma_a"] and\
+            abs(self.corrections["1/a"]) < self.kwargs["max_a"]
 
     def step_state(self, x):
         if self.mode == "standby":
-            self.corrections = self.preamble.step(x)
-            if self.corrections and\
-               self.corrections['sigma_|a|/|a|'] < 0.1 and\
-               abs(self.corrections['1/a']) < 100:
+            self.corrections = self.preamble_detector.step(x)
+            if self.check_corrections():
                 print(self.corrections)
-                self.timer = int(self.corrections['dt'])
+                self.timer = int(self.corrections['dt'] + self.kwargs["dt_bias"])
                 self.stop = 0
                 self.mode = "record"
         elif self.mode == "record":
             y = x * self.corrections['1/a']
-            end = abs(self.end - y) < 0.2
+            end = abs(self.kwargs["conclusion_point"] - y) <\
+                self.kwargs["conclusion_radius"]
             if self.timer > 0:
                 self.timer -= 1
-            elif end and self.stop >= self.suffix:
+            elif end and self.stop >= self.kwargs["conclusion_length_threshold"]:
                 samples = self.samples
                 self.samples = []
                 self.mode = "standby"
@@ -194,8 +215,8 @@ class QAMModem:
                 self.timer = self.U - 1
                 self.samples.append(y)
 
-                if self.max is not None and len(self.samples) - self.stop >\
-                   self.max:
+                if self.kwargs["max_length"] is not None and len(self.samples) - self.stop >\
+                   self.kwargs["max_length"]:
                     self.samples = []
                     self.mode = "standby"
         return None
@@ -249,7 +270,7 @@ if __name__ == "__main__":
     import matplotlib.pyplot as plt
 
     l = 1
-    modem = QAMModem(50000, 3000, 500, 0.25)
+    modem = QAMModem(50000, 3000, 500)
     bits = np.random.randint(0,2,1000)
     ideal = square_qam(bits, l)
     tx = modem.modulate(ideal)

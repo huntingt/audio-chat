@@ -24,7 +24,7 @@ class Model:
         if self.modem is None:
             self.l = l
 
-            self.modem = m.QAMModem(fs, fc, baud, 0.25, max=1024)
+            self.modem = m.QAMModem(fs, fc, baud, max_length=1024)
             
             def callback(in_data, frame_count, time_info, status):
                 msgs = self.modem.demodulate(np.frombuffer(in_data, dtype=np.float32))

@@ -84,10 +84,10 @@ class ConvolutionCode:
 if __name__ == "__main__":
     import modem as m
     
-    l = 1
+    l = 2
     parity = np.array([0b111, 0b011])
     constellation = np.array(
-        [m.square_qam(m.un(num, 2*l), l)[0] for num in range(4)]
+        [m.square_qam(m.un(num, 2*l), l)[0] for num in range(2**(l+l))]
     )
     code = ConvolutionCode(parity, constellation)
 

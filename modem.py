@@ -1,5 +1,4 @@
 import numpy as np
-import matplotlib.pyplot as plt
 
 def bg(bits):
     num = 0
@@ -66,48 +65,88 @@ def root_raised_cos_filter(symbols, U, beta):
     return filter / np.linalg.norm(filter)
 
 class PreambleDetector:
-    def __init__(self, n_peaks, U, **kwargs):
+    def __init__(self, peaks, U, **kwargs):
         self.kwargs = {
-            "peak_end_factor": 0.4,
-            "peak_start_factor": 0.6,
+            "peak_end_factor": 0.6,
+            "peak_start_factor": 0.8,
+            "min_|a|": 0.001,
+            "max_sigma_|a|/|a|": 0.1,
             **kwargs
         }
 
         self.peaks = []
-        self.n_peaks = n_peaks
+        self.ideal_peaks = peaks
         self.max = None
+        self.max_t = 3 * U * len(self.ideal_peaks)
         self.t = 0
         self.U = U
 
-    def peak_avg(self):
+    def preamble(self):
+        result = [0]
+        for peak in self.ideal_peaks:
+            result += [peak, 0]
+        return result
+
+    def peak_max(self):
         if len(self.peaks) == 0:
             return 0
-        return sum(a for t, a in self.peaks)/len(self.peaks)
+        return max(abs(a) for t, a in self.peaks)
+        # return sum(abs(a) for t, a in self.peaks)/len(self.peaks)
 
-    def corrections(self):
-        times = np.array([t for t, x in self.peaks[:-1]])
-        amp = np.array([x for t, x in self.peaks[:-1]])
+    def check_preamble(self):
+        # trim the peaks if necessary
+        while len(self.peaks) > len(self.ideal_peaks):
+            self.peaks = self.peaks[1:]
+
+        # discard peaks that are too old, important to make sure that spurrious
+        # signals don't prevent further peak detection
+        while len(self.peaks) > 0 and self.t - self.peaks[0][0] > self.max_t:
+            self.peaks = self.peaks[1:]
+
+        # reset the time if there are no peaks left
+        if len(self.peaks) == 0:
+            self.t = 0
+
+        if len(self.peaks) != len(self.ideal_peaks):
+            return None
+
+        # multiply by the complex conjugate of the expected peaks to get the
+        # per peak amplitude and phase offset
+        amp = np.array([x for (t, x) in self.peaks])\
+            * np.conj(self.ideal_peaks)
+
+        mean_amp = np.mean(amp)
+        dev_amp = np.std(abs(amp)) / np.mean(abs(amp))
+
+        times = np.array([t for t, x in self.peaks])
 
         times = times - 2 * self.U * np.arange(len(times))
         time_of_first_peak = np.mean(times)
-        time_of_first_data = time_of_first_peak + (2*len(times)+1)*self.U
+        time_of_first_data = time_of_first_peak + (2*len(times)+0)*self.U
+
         dt = time_of_first_data - self.t
         sigma_dt = np.std(times)
 
-        self.peaks = []
-        self.t = 0
+        if abs(mean_amp) >= self.kwargs["min_|a|"] and\
+           dev_amp < self.kwargs["max_sigma_|a|/|a|"]:
 
-        return {
-            "dt": dt,
-            "sigma_dt": sigma_dt,
-            "sigma_|a|/|a|": np.std(abs(amp))/np.mean(abs(amp)),
-            "1/a": 1/np.mean(amp)
-        }
+            self.peaks = []
+            self.t = 0
+
+            return {
+                "dt": dt,
+                "sigma_dt": sigma_dt,
+                "sigma_|a|/|a|": dev_amp,
+                "|a|": abs(mean_amp),
+                "1/a": 1/mean_amp
+            }
+        else:
+            return None
 
     def step(self, x):
         # detect scanning mode for new peaks
         if self.max is None:
-            if abs(x) > self.kwargs["peak_start_factor"] * abs(self.peak_avg()):
+            if abs(x) > self.kwargs["peak_start_factor"] * self.peak_max():
                 self.max = (self.t, x)
         # detect new max for tracking peak
         elif abs(x) > abs(self.max[1]):
@@ -115,23 +154,16 @@ class PreambleDetector:
         # detect end of tracking peak
         elif abs(x) < self.kwargs["peak_end_factor"] * abs(self.max[1]):
             self.peaks.append(self.max)
-            if len(self.peaks) > self.n_peaks:
-                self.peaks = self.peaks[1:]
-                # found a reversed peak, signals end of preamble
-                if self.max[1] * np.conj(self.peak_avg()) < 0:
-                    return self.corrections()
             self.max = None
+            return self.check_preamble()
         self.t += 1
         return None
 
 class QAMModem:
     def __init__(self, fs, fc, baud, **kwargs):
         self.kwargs = {
-            "max_sigma_a": 0.1,
-            "max_a": 100,
-            "dt_bias": 0.,
-            "preamble_peaks": 15,
-            "preamble_peak_threshold": 10,
+            "preamble": [1, 1, 1, 1, 1, 1j, -1j, -1, -1, -1j, 1j, 1],
+            "dt_bias": -7.,
             "conclusion_length": 5,
             "conclusion_length_threshold": 3,
             "conclusion_point": 0.,
@@ -155,9 +187,9 @@ class QAMModem:
             self.kwargs["srrc_beta"]
         )
 
-        self.preamble = [0,1]*self.kwargs["preamble_peaks"] + [-1,1]
-        self.preamble_detector = PreambleDetector(
-            self.kwargs["preamble_peak_threshold"], self.U, **kwargs)
+        self.preamble_detector = PreambleDetector(self.kwargs["preamble"],
+                                                  self.U, **kwargs)
+        self.preamble = self.preamble_detector.preamble()
 
         self.conclusion = [self.kwargs["conclusion_point"]]\
                 * self.kwargs["conclusion_length"]
@@ -184,15 +216,10 @@ class QAMModem:
     def bandwidth(self):
         return self.fs * (1+self.kwargs["srrc_beta"]) / (2*self.U)
 
-    def check_corrections(self):
-        return self.corrections and\
-            self.corrections["sigma_|a|/|a|"] < self.kwargs["max_sigma_a"] and\
-            abs(self.corrections["1/a"]) < self.kwargs["max_a"]
-
     def step_state(self, x):
         if self.mode == "standby":
             self.corrections = self.preamble_detector.step(x)
-            if self.check_corrections():
+            if self.corrections is not None:
                 print(self.corrections)
                 self.timer = int(self.corrections['dt'] + self.kwargs["dt_bias"])
                 self.stop = 0
@@ -246,28 +273,29 @@ def MER(ideal, actual):
     diff = actual - ideal
     return 10*np.log10(num/sum(diff*np.conj(diff))).real
 
-def square_qam_constellation(pairs, l):
-    fig, ax = plt.subplots(figsize = (6, 6))
-    ax.scatter(pairs.real, pairs.imag, c="black", linewidths=1., s=15.,
-               marker="+")
-    ax.tick_params(left=True, right=True, bottom=True, top=True)
-    ax.set_xlabel("I")
-    ax.set_ylabel("Q")
-    size = np.array((-1,1))*(1+1/(2**l-1))/np.sqrt(2)
-    ax.set_xlim(size)
-    ax.set_ylim(size)
-    if l is not None:
-        ax.set_title(f"{2**(l+l)}QAM Constellation")
-        for i in range(1, 2**l):
-            line = (1 - (2*i-1)/(2**l-1))/np.sqrt(2)
-            ax.axvline(x=line, ls="--", c="black", lw=.5)
-            ax.axhline(y=line, ls="--", c="black", lw=.5)
-    else:
-        ax.set_title(f"QAM Constellation")
-    plt.tight_layout()
-    plt.show()
-
 if __name__ == "__main__":
+    import matplotlib.pyplot as plt
+
+    def square_qam_constellation(pairs, l):
+        fig, ax = plt.subplots(figsize = (6, 6))
+        ax.scatter(pairs.real, pairs.imag, c="black", linewidths=1., s=15.,
+                   marker="+")
+        ax.tick_params(left=True, right=True, bottom=True, top=True)
+        ax.set_xlabel("I")
+        ax.set_ylabel("Q")
+        size = np.array((-1,1))*(1+1/(2**l-1))/np.sqrt(2)
+        ax.set_xlim(size)
+        ax.set_ylim(size)
+        if l is not None:
+            ax.set_title(f"{2**(l+l)}QAM Constellation")
+            for i in range(1, 2**l):
+                line = (1 - (2*i-1)/(2**l-1))/np.sqrt(2)
+                ax.axvline(x=line, ls="--", c="black", lw=.5)
+                ax.axhline(y=line, ls="--", c="black", lw=.5)
+        else:
+            ax.set_title(f"QAM Constellation")
+        plt.tight_layout()
+        plt.show()
 
     l = 2
     modem = QAMModem(50000, 3000, 500)
